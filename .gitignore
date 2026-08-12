@@ -216,3 +216,10 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Project data - regenerable from src/ scripts, stored in feature store from Phase 4
+data/raw/*.csv
+data/processed/*.csv
+models/*.pkl
+models/*.h5
+!**/.gitkeep
