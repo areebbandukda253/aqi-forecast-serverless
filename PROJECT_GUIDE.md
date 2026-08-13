@@ -3,7 +3,7 @@
 A running journal of how this project was built — the decisions, the reasoning behind
 them, and the problems encountered along the way.
 
-Where the README says *what* the project is, this document says *why* it is that way.
+Where the README says _what_ the project is, this document says _why_ it is that way.
 
 ---
 
@@ -11,6 +11,7 @@ Where the README says *what* the project is, this document says *why* it is that
 
 - [Phase 0 — Environment setup](#phase-0--environment-setup)
 - [Phase 1 — Data collection](#phase-1--data-collection)
+- [Phase 2 — Exploratory data analysis](#phase-2--exploratory-data-analysis)
 
 ---
 
@@ -44,13 +45,13 @@ anyone can regenerate from `requirements.txt`.
 
 ### Project layout
 
-| Directory | Purpose |
-|---|---|
-| `data/raw/` | Exactly what the API returned. Never modified. |
-| `data/processed/` | Output of cleaning and merging scripts |
-| `notebooks/` | Exploratory analysis |
-| `src/` | Pipeline scripts intended to run unattended |
-| `models/` | Trained model artefacts |
+| Directory         | Purpose                                        |
+| ----------------- | ---------------------------------------------- |
+| `data/raw/`       | Exactly what the API returned. Never modified. |
+| `data/processed/` | Output of cleaning and merging scripts         |
+| `notebooks/`      | Exploratory analysis                           |
+| `src/`            | Pipeline scripts intended to run unattended    |
+| `models/`         | Trained model artefacts                        |
 
 The raw/processed separation is deliberate. If a cleaning script has a bug, the raw
 files allow re-processing without re-downloading. Overwriting raw data is
@@ -106,13 +107,13 @@ git check-ignore -v .env
 
 The brief suggested AQICN or OpenWeather. Both were evaluated against Open-Meteo.
 
-| | AQICN | OpenWeather | Open-Meteo |
-|---|---|---|---|
-| API key required | Yes | Yes | No |
-| Free historical data | Very limited | From Nov 2020 | From Aug 2022 |
-| Returns AQI directly | Yes | No — raw pollutants only | Yes (`us_aqi`) |
-| Weather from same provider | No | Yes | Yes |
-| Daily request limit | ~1,000 | ~1,000 | 10,000 |
+|                            | AQICN        | OpenWeather              | Open-Meteo     |
+| -------------------------- | ------------ | ------------------------ | -------------- |
+| API key required           | Yes          | Yes                      | No             |
+| Free historical data       | Very limited | From Nov 2020            | From Aug 2022  |
+| Returns AQI directly       | Yes          | No — raw pollutants only | Yes (`us_aqi`) |
+| Weather from same provider | No           | Yes                      | Yes            |
+| Daily request limit        | ~1,000       | ~1,000                   | 10,000         |
 
 **Open-Meteo was selected**, on three grounds:
 
@@ -128,7 +129,7 @@ The brief suggested AQICN or OpenWeather. Both were evaluated against Open-Meteo
 3. **No authentication.** Nothing to configure in CI, no key to expire mid-pipeline, no
    secret to leak. Anyone cloning the repository can run it immediately.
 
-**Known limitation.** Outside Europe, Open-Meteo serves the CAMS *global* model at
+**Known limitation.** Outside Europe, Open-Meteo serves the CAMS _global_ model at
 roughly 45 km resolution. These are modelled estimates, not readings from a ground
 sensor in Karachi. The values are physically consistent and suitable for forecasting,
 but they are not the same thing as a measurement from a specific street. A future
@@ -179,16 +180,16 @@ introduce a systematic distortion into any daily aggregate.
 
 Weather is not supplementary here — it drives the mechanism.
 
-| Variable | Physical relevance |
-|---|---|
-| Wind speed | Disperses pollutants. Expected to be a dominant predictor. |
-| Wind direction | Determines what is carried in. Karachi is coastal: sea breeze is clean, inland flow is not. |
-| Precipitation | Scavenges particulates from the air column. |
-| Temperature | Drives inversions, which cap vertical mixing. |
-| Relative humidity | Hygroscopic growth of particles inflates PM readings. |
-| Surface pressure | High pressure implies stagnation and suppressed mixing. |
-| Dew point | Combined with temperature, indicates inversion conditions. |
-| Cloud cover | Modulates photochemistry, particularly ozone formation. |
+| Variable          | Physical relevance                                                                          |
+| ----------------- | ------------------------------------------------------------------------------------------- |
+| Wind speed        | Disperses pollutants. Expected to be a dominant predictor.                                  |
+| Wind direction    | Determines what is carried in. Karachi is coastal: sea breeze is clean, inland flow is not. |
+| Precipitation     | Scavenges particulates from the air column.                                                 |
+| Temperature       | Drives inversions, which cap vertical mixing.                                               |
+| Relative humidity | Hygroscopic growth of particles inflates PM readings.                                       |
+| Surface pressure  | High pressure implies stagnation and suppressed mixing.                                     |
+| Dew point         | Combined with temperature, indicates inversion conditions.                                  |
+| Cloud cover       | Modulates photochemistry, particularly ozone formation.                                     |
 
 There is a forecasting advantage embedded here: weather is itself forecastable with
 reasonable skill at a three-day horizon. Forecast weather can therefore be supplied as
@@ -231,7 +232,7 @@ A completeness check runs after every merge:
 expected_hours = int((merged["time"].max() - merged["time"].min()).total_seconds() / 3600) + 1
 ```
 
-This compares the number of hourly slots that *should* exist across the date range
+This compares the number of hourly slots that _should_ exist across the date range
 against the number of rows actually present. Silent row loss during a merge — from a
 timezone mismatch, a dtype mismatch, or duplicate keys — produces a file that looks
 entirely normal while corrupting every downstream lag feature. The check makes that
@@ -239,14 +240,14 @@ failure loud.
 
 ### Phase 1 result
 
-| | |
-|---|---|
-| Output | `data/processed/merged_hourly.csv` |
-| Rows | 31,656 |
-| Columns | 16 |
-| Range | 2023-01-01 00:00 to present |
-| Missing hours | 0 |
-| Missing values | 0 |
+|                |                                    |
+| -------------- | ---------------------------------- |
+| Output         | `data/processed/merged_hourly.csv` |
+| Rows           | 31,656                             |
+| Columns        | 16                                 |
+| Range          | 2023-01-01 00:00 to present        |
+| Missing hours  | 0                                  |
+| Missing values | 0                                  |
 
 ### Noted for Phase 3
 
@@ -261,3 +262,192 @@ wind_dir_cos = np.cos(np.radians(wind_direction_10m))
 
 This matters more than usual for a coastal city, where wind direction distinguishes
 clean marine air from polluted continental air.
+
+## Phase 2 — Exploratory data analysis
+
+**Goal:** understand the target well enough to design features deliberately rather than
+by guesswork. Every finding below either created or eliminated a feature.
+
+Notebook: `notebooks/01_eda.ipynb`
+
+### The target distribution
+
+|                     |        |
+| ------------------- | ------ |
+| Mean                | 90.1   |
+| Median              | 82.0   |
+| Min                 | 41     |
+| Max                 | 297    |
+| Std dev             | 27.5   |
+| Interquartile range | 72–100 |
+
+| Category                                 | Hours  | Share |
+| ---------------------------------------- | ------ | ----- |
+| Good (0–50)                              | 64     | 0.2%  |
+| Moderate (51–100)                        | 23,806 | 75.2% |
+| Unhealthy for sensitive groups (101–150) | 6,156  | 19.4% |
+| Unhealthy (151–200)                      | 1,481  | 4.7%  |
+| Very unhealthy (201–300)                 | 149    | 0.5%  |
+| Hazardous (301+)                         | 0      | 0.0%  |
+
+Across 3.5 years, only 64 hours registered as "Good". The observed minimum is 41 — the
+air is never clean by the US standard. The distribution is right-skewed: the bulk sits
+in a narrow band with a long tail toward severe episodes, which places the mean above
+the median.
+
+**Two consequences for modelling.** First, the low variance means a naive
+mean-prediction achieves a deceptively low MAE, so Phase 6 must establish honest
+baselines before any model is judged. Second, R² may appear modest even for a strong
+model, because there is limited variance available to explain. The metric should be
+interpreted against the baseline rather than against an abstract standard.
+
+**Reporting limitation.** The observed maximum of 297 and the complete absence of
+hazardous hours understate reality. Karachi does experience worse. This is the 45 km
+CAMS global grid averaging local peaks across an area much larger than the city. The
+system forecasts regional air quality, not street-level exposure.
+
+### Seasonality
+
+| Month | Mean AQI |     | Month | Mean AQI |
+| ----- | -------- | --- | ----- | -------- |
+| Jan   | 117.3    |     | Jul   | 84.6     |
+| Feb   | 103.0    |     | Aug   | 73.5     |
+| Mar   | 93.7     |     | Sep   | 75.9     |
+| Apr   | 80.4     |     | Oct   | 86.9     |
+| May   | 73.9     |     | Nov   | 110.9    |
+| Jun   | 78.0     |     | Dec   | 106.0    |
+
+January averages 117.3 against May's 73.9 — a 59% difference. Winter is substantially
+worse than summer.
+
+Plotting each year separately confirms the pattern is structural rather than incidental:
+2023, 2024, 2025 and 2026 all trace the same U-shape, elevated at both ends of the
+calendar and troughing in May–September. 2023 sits higher overall, but the shape repeats
+without exception.
+
+The mechanism is meteorological. Cooler winter air forms temperature inversions that cap
+vertical mixing and trap pollution near the surface, while winds are lighter. Summer
+brings monsoon activity and a stronger sea breeze off the Arabian Sea, both of which
+disperse pollutants.
+
+**Feature created:** month, encoded cyclically.
+
+### Autocorrelation — the decisive result
+
+| Lag                    | Autocorrelation |
+| ---------------------- | --------------- |
+| 1 hour                 | 0.990           |
+| 6 hours                | 0.896           |
+| 24 hours               | 0.754           |
+| **1 day (daily mean)** | **0.835**       |
+| **2 days**             | **0.677**       |
+| **3 days**             | **0.590**       |
+| 7 days                 | 0.459           |
+
+This is the single most important measurement in the phase. It establishes that AQI is
+forecastable at the required horizon at all.
+
+At 0.835, yesterday's daily average explains a large share of today's. Memory decays
+steadily but never vanishes — the residual 0.459 at seven days reflects the seasonal
+signal persisting underneath.
+
+**Three implications:**
+
+1. Lag features will be the strongest predictors available. They warrant careful
+   construction.
+2. The decay 0.835 → 0.677 → 0.590 defines the difficulty gradient across horizons.
+   Error should be expected to increase from day+1 to day+3; a flat error profile across
+   horizons would indicate a bug rather than a success.
+3. A persistence baseline — "tomorrow equals today" — will score well given this
+   correlation. It is the bar any model must clear to justify its existence.
+
+### Daily cycle
+
+AQI is flat from midnight through 14:00 at approximately 89, rises to a peak of 96.5 at
+19:00, then declines.
+
+The single evening peak, rather than the twin morning-and-evening peaks characteristic
+of traffic-driven pollution, indicates the dominant mechanism is the evening collapse of
+the atmospheric boundary layer: as the surface cools after sunset, vertical mixing ceases
+and existing pollution concentrates into a shallower volume.
+
+The amplitude is modest — a 7-point swing on a target ranging 41–297. Real, but minor
+relative to seasonal variation.
+
+### Correlation with the target
+
+| Variable             | Correlation with us_aqi |
+| -------------------- | ----------------------- |
+| pm2_5                | **0.732**               |
+| sulphur_dioxide      | 0.529                   |
+| carbon_monoxide      | 0.511                   |
+| surface_pressure     | **0.447**               |
+| dew_point_2m         | -0.429                  |
+| nitrogen_dioxide     | 0.418                   |
+| pm10                 | 0.361                   |
+| temperature_2m       | -0.359                  |
+| relative_humidity_2m | -0.295                  |
+| wind_speed_10m       | -0.283                  |
+| wind_direction_10m   | -0.268                  |
+| ozone                | 0.265                   |
+| cloud_cover          | -0.194                  |
+| precipitation        | **-0.033**              |
+
+**PM2.5 dominates at 0.732**, more than double PM10's 0.361. This identifies PM2.5 as
+the pollutant most frequently setting the AQI maximum, and justifies giving it the same
+lag treatment as the target itself.
+
+**Surface pressure at 0.447** is the strongest weather variable and confirms the
+stagnation hypothesis: high pressure suppresses vertical mixing and allows accumulation.
+It is also the most operationally useful weather feature, because pressure is forecast
+accurately several days ahead and can therefore be supplied as genuine forecast input at
+inference time rather than assumed.
+
+**An important caveat.** These are contemporaneous correlations. That PM2.5 correlates
+with AQI in the same hour is close to tautological, since AQI is computed from pollutant
+concentrations including PM2.5. It does not establish that today's PM2.5 predicts AQI
+three days ahead. The evidence for forecastability at horizon comes from the
+autocorrelation figures, not from this table.
+
+### Features eliminated
+
+Four candidate features were removed on evidence rather than convenience. Each had a
+plausible prior justification.
+
+| Feature                 | Reason                                                                                                                                                                                                                                                                                                   |
+| ----------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `precipitation`         | Correlation -0.033. Karachi is arid: the 75th percentile of hourly rainfall is 0.0, so the variable is zero for the overwhelming majority of observations and offers almost nothing to learn from. The physical mechanism — wet deposition scavenging particulates — is genuine, but rarely active here. |
+| `dayofweek`             | Mean AQI is 88–91 across all seven days, with no discernible weekday/weekend structure. The expected commuter-traffic signature is absent, either because traffic is not the dominant emission source or because the 45 km grid averages it away.                                                        |
+| `dew_point_2m`          | Correlates 0.80 with relative humidity and -0.77 with surface pressure. Dew point is derived from temperature and humidity and therefore contributes no independent information, while diluting feature importance across collinear variables and obscuring SHAP interpretation.                         |
+| `boundary_layer_height` | Removed in Phase 1: contiguous six-month gap and unreliable availability at inference time.                                                                                                                                                                                                              |
+
+Two of these — precipitation and day-of-week — were predicted to be important on
+physical and behavioural grounds before the data was examined. Both were wrong. This is
+the principal justification for conducting EDA before feature engineering rather than
+after.
+
+### Multicollinearity noted
+
+Several predictor pairs are strongly related and should be watched during feature
+selection and SHAP interpretation:
+
+| Pair                               | Correlation |
+| ---------------------------------- | ----------- |
+| dew_point ↔ relative_humidity      | 0.80        |
+| carbon_monoxide ↔ nitrogen_dioxide | 0.79        |
+| dew_point ↔ surface_pressure       | -0.77       |
+| temperature ↔ surface_pressure     | -0.69       |
+
+CO and NO2 at 0.79 share a common source in combustion. Both are retained for now, since
+tree-based models tolerate collinearity for prediction, but their importance scores
+should be read as a pair rather than independently.
+
+### Resulting feature plan for Phase 3
+
+| Status                     | Variables                                                                                                                            |
+| -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| Core, full lag treatment   | `us_aqi`, `pm2_5`                                                                                                                    |
+| Strong predictors          | `surface_pressure`, `sulphur_dioxide`, `carbon_monoxide`                                                                             |
+| Retained                   | `pm10`, `nitrogen_dioxide`, `ozone`, `temperature_2m`, `relative_humidity_2m`, `wind_speed_10m`, `wind_direction_10m`, `cloud_cover` |
+| Cyclical encoding required | `month`, `wind_direction_10m`                                                                                                        |
+| Eliminated                 | `precipitation`, `dew_point_2m`, `dayofweek`, `boundary_layer_height`                                                                |

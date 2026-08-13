@@ -123,7 +123,7 @@ aqi-forecast-serverless/
 
 - [x] Phase 0 — Environment and repository setup
 - [x] Phase 1 — Historical data collection
-- [ ] Phase 2 — Data cleaning and exploratory analysis
+- [x] Phase 2 — Data cleaning and exploratory analysis
 - [ ] Phase 3 — Feature engineering
 - [ ] Phase 4 — Feature store
 - [ ] Phase 5 — Training dataset creation
