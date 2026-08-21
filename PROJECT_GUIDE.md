@@ -12,6 +12,7 @@ Where the README says _what_ the project is, this document says _why_ it is that
 - [Phase 0 — Environment setup](#phase-0--environment-setup)
 - [Phase 1 — Data collection](#phase-1--data-collection)
 - [Phase 2 — Exploratory data analysis](#phase-2--exploratory-data-analysis)
+- [Phase 3 — Feature engineering](#phase-3--feature-engineering)
 
 ---
 
@@ -451,3 +452,183 @@ should be read as a pair rather than independently.
 | Retained                   | `pm10`, `nitrogen_dioxide`, `ozone`, `temperature_2m`, `relative_humidity_2m`, `wind_speed_10m`, `wind_direction_10m`, `cloud_cover` |
 | Cyclical encoding required | `month`, `wind_direction_10m`                                                                                                        |
 | Eliminated                 | `precipitation`, `dew_point_2m`, `dayofweek`, `boundary_layer_height`                                                                |
+
+## Phase 3 — Feature engineering
+
+**Goal:** convert the Phase 2 findings into a leakage-free feature set, and produce a
+single code path that serves both training and inference.
+
+Script: `src/build_features.py`
+
+### Data leakage
+
+Leakage is the use of information during training that would not be available at
+prediction time. It is the most consequential failure mode in time-series ML because it
+is silent: a leaking model reports excellent validation scores and then fails completely
+in production, with no error to diagnose.
+
+The governing rule adopted here: **every feature for a given date must be computable
+using only data from that date and earlier.**
+
+Two specific hazards apply to lag construction:
+
+1. **Centred rolling windows.** `rolling(7, center=True)` averages three days before and
+   three days after the current row. Half of every value is drawn from the future.
+   Default `rolling(7)` looks strictly backward and is used throughout.
+2. **Rolling windows including the present.** `rolling(7).mean()` on a given row includes
+   that row's own value. This is acceptable as a description of the current state, but
+   would be leakage if the same day were also the prediction target. The target/feature
+   separation below prevents this.
+
+Negative shifts — the only operation that moves future data backward — appear exclusively
+in target construction, never in a feature.
+
+### Temporal resolution: daily rather than hourly
+
+The raw data is hourly; the forecast horizon is measured in days. Modelling at daily
+resolution was chosen.
+
+|                        | Hourly                | Daily                      |
+| ---------------------- | --------------------- | -------------------------- |
+| Rows available         | 31,656                | 1,319                      |
+| Steps to reach day+3   | 72                    | 3                          |
+| Error accumulation     | Compounds severely    | Minimal                    |
+| Signal magnitude (EDA) | Hour effect: 7 points | Seasonal effect: 44 points |
+
+The Phase 2 diurnal analysis found a 7-point swing across the day against a 44-point
+swing across the year. The information is concentrated in the daily and seasonal signal,
+not the hourly one. A daily model also matches the actual use case — users ask whether
+a given day will be bad, not what the reading will be at 15:00.
+
+**Trade-off accepted:** the 19:00 boundary-layer peak is not represented directly.
+Retaining both `us_aqi_mean` and `us_aqi_max` per day preserves the day's severity, and
+`us_aqi_max` becomes the trigger for health alerts in Phase 18.
+
+1,319 daily rows covers 3.6 complete seasonal cycles, which is sufficient for tabular
+models on this problem.
+
+### Aggregation
+
+Most variables are reduced to a daily mean. Three retain additional statistics:
+
+| Variable         | Aggregations   | Justification                                                                                                |
+| ---------------- | -------------- | ------------------------------------------------------------------------------------------------------------ |
+| `us_aqi`         | mean, max, min | Mean is the target; max captures episode severity and drives alerting                                        |
+| `temperature_2m` | mean, max, min | Daily range indicates clear skies and strong radiative cooling, which is associated with inversion formation |
+| `wind_speed_10m` | mean, max      | A calm day with one windy hour disperses differently from a uniformly moderate day                           |
+
+### Cyclical encoding
+
+Two variables are angular and cannot be supplied as raw numbers.
+
+**Wind direction** (1–360°): 359° and 1° are two degrees apart physically but 358 apart
+numerically. A model reads a discontinuity where none exists.
+
+**Month** (1–12): December and January are adjacent months and, per Phase 2, the two
+worst months of the year. As integers they are maximally distant.
+
+Both are decomposed onto a unit circle:
+
+```python
+sin_component = np.sin(2 * np.pi * value / period)
+cos_component = np.cos(2 * np.pi * value / period)
+```
+
+Wind direction is converted to sine and cosine **before** daily aggregation. Averaging
+compass degrees directly is invalid — the arithmetic mean of 350° and 10° is 180°, the
+opposite direction. Averaging the sine and cosine components separately yields the
+correct circular mean.
+
+### Lag and rolling features
+
+| Family                           | Definition                                 | Rationale                                                                                                               |
+| -------------------------------- | ------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------- |
+| Lags 1, 2, 3                     | `shift(n)` on AQI, PM2.5, surface pressure | Direct memory. Phase 2 autocorrelation of 0.835 / 0.677 / 0.590 confirms substantial signal at exactly these horizons.  |
+| Lags 7, 14                       | as above                                   | Weekly and biweekly context. Autocorrelation remains 0.459 at seven days.                                               |
+| Rolling mean (3, 7, 14, 30)      | backward-only window                       | Smoothed trend, less sensitive to single-day noise than a raw lag.                                                      |
+| Rolling std (3, 7, 14, 30)       | backward-only window                       | Volatility. Allows the model to distinguish stable periods from unstable ones, which differ in predictability.          |
+| `aqi_change_1d`, `aqi_change_3d` | current minus shifted                      | Momentum. A rising trend and a falling trend at the same absolute level imply different futures.                        |
+| `aqi_vs_roll7`                   | current minus 7-day mean                   | Anomaly relative to recent baseline. Separates "high because it is January" from "high because an episode is underway". |
+
+Lag treatment is applied to `us_aqi_mean`, `pm2_5_mean` and `surface_pressure_mean` —
+the target itself plus the two strongest predictors identified in Phase 2 (PM2.5 at
+0.732, surface pressure at 0.447).
+
+### Forecast architecture: direct multi-model
+
+Three approaches were considered for producing predictions at day+1, day+2 and day+3.
+
+| Approach                                                   | Assessment                                                                                                                                                                                                                       |
+| ---------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Recursive** — one 1-step model, output fed back as input | Rejected. Errors compound: a day+1 error becomes an input to day+2, which errs by more. By day+3 the model is predicting from predictions of predictions. Also fragile operationally — a single failure breaks the entire chain. |
+| **Multi-output** — one model, three simultaneous outputs   | Rejected. Supported in scikit-learn only through wrappers, and unsupported by XGBoost and most hyperparameter tuning workflows. Would mean working against the tooling for no clear gain.                                        |
+| **Direct multi-model** — three models, one per horizon     | **Selected.**                                                                                                                                                                                                                    |
+
+Reasons for the selection:
+
+- **No error compounding.** Each horizon is predicted directly from observed data.
+- **Independent evaluation.** Produces a genuine per-horizon MAE for the Phase 8
+  comparison table.
+- **Horizon specialisation.** The autocorrelation decay from 0.835 to 0.590 indicates
+  these are materially different problems. Day+3 may rely more on seasonality and less on
+  recent lags; separate models can reflect that, including through different
+  hyperparameters.
+- **Graceful degradation.** Failure of the day+3 model leaves days 1 and 2 serving.
+
+**Cost accepted:** three models to train, register and monitor rather than one. Training
+on approximately 1,300 rows takes seconds, so the overhead is negligible.
+
+### Target construction
+
+```python
+for horizon in [1, 2, 3]:
+    out[f"target_day{horizon}"] = out["us_aqi_mean"].shift(-horizon)
+```
+
+The negative shift moves future values backward, so each row reads: given everything
+known on this date, the answer for the specified horizon is this value.
+
+Verified manually — for 2023-01-01, `target_day1` equals 119.417, which is the recorded
+`us_aqi_mean` for 2023-01-02. The final three rows carry NaN targets in a descending
+staircase, correctly reflecting that those future values do not yet exist.
+
+### Row loss
+
+|                             |                          |
+| --------------------------- | ------------------------ |
+| Daily rows before filtering | 1,319                    |
+| Rows dropped                | 32                       |
+| Rows retained               | 1,287                    |
+| Effective range             | 2023-01-30 to 2026-08-08 |
+
+Twenty-nine rows are lost at the start, where the 30-day rolling window has insufficient
+history. Three are lost at the end, where targets do not yet exist. A 2.4% loss in
+exchange for a 30-day trend feature is a favourable trade.
+
+### Shared code path for training and inference
+
+`build_features.py` exposes a single entry point:
+
+```python
+def build(hourly, include_targets=True):
+```
+
+Training calls it with targets included. The Phase 10 prediction pipeline calls it with
+`include_targets=False` — identical aggregation, identical lags, identical encodings, no
+targets.
+
+This is a deliberate guard against training-serving skew, the failure in which a model is
+trained on features computed one way and served features computed subtly differently. If
+training and inference had separate implementations they would diverge at the first
+change to a feature definition. A single shared function makes divergence impossible.
+
+### Phase 3 result
+
+|                  |                                          |
+| ---------------- | ---------------------------------------- |
+| Output           | `data/processed/daily_features.csv`      |
+| Rows             | 1,287                                    |
+| Columns          | 59 (55 features, 3 targets, 1 timestamp) |
+| Range            | 2023-01-30 to 2026-08-08                 |
+| Missing values   | 0                                        |
+| Leakage verified | Manually, on head and tail               |
