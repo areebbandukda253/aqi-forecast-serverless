@@ -14,6 +14,7 @@ Where the README says _what_ the project is, this document says _why_ it is that
 - [Phase 2 — Exploratory data analysis](#phase-2--exploratory-data-analysis)
 - [Phase 3 — Feature engineering](#phase-3--feature-engineering)
 - [Phase 4 — Feature store](#phase-4--feature-store)
+- [Phase 5 — Training dataset](#phase-5--training-dataset)
 
 ---
 
@@ -793,3 +794,94 @@ as one of the cleanest months of the year. This is expected behaviour, not drift
 | Features      | 59                      |
 | Storage       | Offline                 |
 | Round trip    | Verified                |
+
+## Phase 5 — Training dataset
+
+**Goal:** produce a reproducible train/test split that does not leak future information.
+
+Scripts: `src/create_feature_view.py`, `src/create_training_data.py`
+
+### Feature view
+
+A feature view is a named, versioned selection of features and labels. Both the training
+script and the prediction pipeline reference the same view, so both receive identical
+columns in identical order — a structural guard against training-serving skew.
+
+|          |                                             |
+| -------- | ------------------------------------------- |
+| Name     | `aqi_forecast_view` v1                      |
+| Features | 55                                          |
+| Labels   | `target_day1`, `target_day2`, `target_day3` |
+
+Declaring the targets as `labels` means the feature view returns features and labels as
+separate objects, making it impossible to accidentally pass a target in as an input.
+
+### Why the split is chronological, not random
+
+The conventional `train_test_split(..., shuffle=True)` is invalid for this problem.
+
+Random assignment places some days in training and their immediate neighbours in test.
+Given the Phase 2 autocorrelation of 0.835 at one day, a model can effectively
+interpolate a held-out day from the days either side of it. Reported error would be
+optimistic and production performance substantially worse, with no warning in the metrics.
+
+A chronological split mirrors deployment conditions: the model sees only the past and
+predicts the future.
+
+```python
+train = df[df["time"] < split_date]
+test  = df[df["time"] >= split_date]
+
+assert train["time"].max() < test["time"].min(), "Train and test overlap in time"
+```
+
+The assertion converts a silent correctness failure into an immediate crash. Leakage does
+not raise errors on its own — it simply produces good-looking numbers, so it has to be
+checked for explicitly.
+
+|       | Rows  | Range                    |
+| ----- | ----- | ------------------------ |
+| Train | 1,046 | 2023-01-30 to 2025-12-10 |
+| Test  | 262   | 2025-12-11 to 2026-08-29 |
+
+Target means are 89.2 (train) against 87.5 (test) — close enough that the model is not
+being asked to predict a distribution it never observed.
+
+The test period spans December through August, so it covers both the high-pollution
+winter months and the cleaner summer months identified in Phase 2. Per-month error should
+still be reported in Phase 8, since an aggregate metric can conceal seasonal weakness.
+
+### Client library defect and workaround
+
+`fv.training_data()` failed with:
+
+```
+AttributeError: 'ArrowFlightClient' object has no attribute '_server_version'
+```
+
+The traceback originates entirely within `hsfs/core/arrow_flight_client.py`, and the
+library's own error handler then failed for the same reason — a defect in the client
+rather than in project code.
+
+`fg.read()` uses a different code path and had already been verified working in Phase 4,
+so training data is materialised directly from the feature group instead. The feature view
+remains in place and continues to define the feature and label schema; only the read path
+differs. Split logic and correctness guarantees are unaffected.
+
+**Note on `--force-reinstall`.** An attempted fix using `pip install --force-reinstall`
+silently upgraded pandas to 2.3.3 and numpy to 2.4.6, overriding the pinned versions and
+breaking `great-expectations`. The flag ignores existing constraints and reinstalls the
+entire dependency tree at latest versions — precisely what a pinned `requirements.txt`
+exists to prevent. Running `pip install -r requirements.txt` restored the correct set.
+Where a single package genuinely needs reinstalling, `--no-deps` should be used so the
+rest of the environment is left untouched.
+
+### Phase 5 result
+
+|                  |                                                       |
+| ---------------- | ----------------------------------------------------- |
+| Feature view     | `aqi_forecast_view` v1                                |
+| Train            | 1,046 rows                                            |
+| Test             | 262 rows                                              |
+| Temporal overlap | None (asserted)                                       |
+| Output           | `data/processed/train.csv`, `data/processed/test.csv` |

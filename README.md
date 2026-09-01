@@ -126,7 +126,7 @@ aqi-forecast-serverless/
 - [x] Phase 2 — Data cleaning and exploratory analysis
 - [x] Phase 3 — Feature engineering
 - [x] Phase 4 — Feature store
-- [ ] Phase 5 — Training dataset creation
+- [x] Phase 5 — Training dataset creation
 - [ ] Phase 6 — Baseline model
 - [ ] Phase 7 — Model experiments
 - [ ] Phase 8 — Evaluation and selection
