@@ -633,3 +633,163 @@ change to a feature definition. A single shared function makes divergence imposs
 | Range            | 2023-01-30 to 2026-08-08                 |
 | Missing values   | 0                                        |
 | Leakage verified | Manually, on head and tail               |
+
+## Phase 4 — Feature store
+
+**Goal:** move features out of local CSV files and into a managed feature store, so that
+training and inference read from a single shared source.
+
+Scripts: `src/test_hopsworks.py`, `src/upload_features.py`, `src/read_features.py`
+
+### Why a feature store rather than CSV files
+
+A local CSV works fine for a single developer running scripts by hand. It fails on three
+counts once the system is automated.
+
+**Training-serving skew.** The training script reads a CSV; the prediction pipeline
+computes features fresh from live API data. Two code paths mean two opportunities to
+diverge. A change to one lag definition that is not mirrored in the other produces a
+model silently receiving inputs it was never trained on — with no error raised.
+
+**No shared filesystem.** From Phase 14, GitHub Actions runs the pipeline on an ephemeral
+runner that is destroyed after each job. A local CSV does not exist there. The pipeline
+needs a persistent, network-accessible store.
+
+**No history.** Overwriting a CSV destroys the previous version. When model performance
+degrades in Phase 17, there is no way to reconstruct what the model was actually trained
+on.
+
+### Platform selection
+
+The brief permitted Hopsworks or Vertex AI. Hopsworks was selected: it provides both a
+feature store and a model registry on a genuinely free tier with no credit card
+requirement, and its Python-first API suits a pandas-based pipeline better than Vertex
+AI's heavier GCP setup.
+
+Free tier limits: one project, feature store and model registry included, model serving
+excluded. Model serving is not required — inference is handled by the Streamlit app and
+FastAPI service in Phases 11–13.
+
+### Development environment migration to WSL
+
+Installing the Hopsworks client on Windows failed and could not be resolved by version
+adjustment. The sequence is documented here because the diagnosis matters more than the
+outcome.
+
+| Attempt                                         | Result                                                          |
+| ----------------------------------------------- | --------------------------------------------------------------- |
+| `hopsworks[python]==4.2.0` with `pandas==2.2.3` | `ResolutionImpossible` — version conflict                       |
+| Unpinned hopsworks                              | Resolver selected a version requiring compilation               |
+| `hopsworks[python]==3.7.0`                      | Conflict again: constraint was `pandas<2.2.0`, not `pandas<2.0` |
+| `pandas==2.1.4` + `hopsworks==3.7.0`            | Reached the build stage, then failed                            |
+| `pip install twofish --only-binary=:all:`       | `No matching distribution found`                                |
+
+The blocking dependency was `twofish`, a C-based encryption library with no prebuilt
+Windows wheel. Installing it requires compiling from source, which requires Microsoft
+Visual C++ Build Tools — a 6–7 GB toolchain.
+
+**Resolution: development moved to WSL 2 running Ubuntu 24.04 LTS.**
+
+Rationale beyond the immediate fix:
+
+- Linux wheels exist for every dependency in the stack, and `build-essential` supplies
+  gcc at a fraction of the size of the Windows toolchain.
+- Phases 13–16 deploy to Linux and execute on Ubuntu-based CI runners. Developing on the
+  same operating system as the deployment target removes an entire class of
+  platform-specific defects that would otherwise surface during automation.
+
+`twofish` compiled in approximately two seconds on Linux.
+
+**Migration note.** Two scripts written on Windows were absent after cloning into WSL,
+because they had been created but never committed. This prompted a change in working
+practice: commit and push at the end of each session rather than only at phase
+boundaries. Work that is not pushed does not exist.
+
+### Client and backend version alignment
+
+The first connection attempt authenticated successfully but failed on
+`get_feature_store()`:
+
+```
+TypeError: FeatureStore.__init__() missing 1 required positional argument: 'hive_endpoint'
+```
+
+The client had already warned of the cause: client version 3.7.0 against backend version
+5.0.3. The server returns a schema the older client cannot deserialise. Upgrading the
+client to 5.0.6 resolved it.
+
+**Generalisable point:** when a managed service is involved, client and backend versions
+must be aligned. Pinning a client version for local dependency reasons can silently
+break against a server that has since been upgraded. The client's own warning message
+identified the problem before the traceback did.
+
+### Final environment
+
+|           |                            |
+| --------- | -------------------------- |
+| OS        | Ubuntu 24.04.4 LTS (WSL 2) |
+| Python    | 3.12.3                     |
+| pandas    | 2.1.4                      |
+| hopsworks | 5.0.6                      |
+| Compiler  | gcc 13.3.0                 |
+
+### Feature group configuration
+
+```python
+fg = fs.get_or_create_feature_group(
+    name="aqi_daily_features",
+    version=1,
+    primary_key=["time"],
+    event_time="time",
+    online_enabled=False,
+)
+```
+
+| Setting          | Value      | Reasoning                                                                                                                                                                                                   |
+| ---------------- | ---------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `primary_key`    | `["time"]` | Identifies each row uniquely. When the Phase 14 pipeline re-uploads a date already present, Hopsworks updates rather than duplicates. Without a primary key the store would accumulate copies.              |
+| `event_time`     | `"time"`   | Marks the group as time-series, enabling point-in-time correct joins in Phase 5.                                                                                                                            |
+| `online_enabled` | `False`    | The online store serves single feature vectors at low latency for real-time inference. This system produces daily batch predictions, so the offline store is appropriate and consumes less free-tier quota. |
+| `version`        | `1`        | Schema changes create version 2 rather than mutating version 1, so existing models continue to resolve against the schema they were trained on.                                                             |
+
+`get_or_create_feature_group` is idempotent — it creates on first call and retrieves
+thereafter. This makes the upload script safe to run repeatedly, which is a requirement
+for scheduled execution.
+
+`insert()` is asynchronous by default and returns before data is materialised.
+`write_options={"wait_for_job": True}` blocks until the write completes, so failures
+surface at the point of upload rather than as missing data later.
+
+### Verification
+
+Upload success was not taken on trust. The round trip was verified by reading the data
+back through a separate script:
+
+|                | Local file               | Read from Hopsworks      |
+| -------------- | ------------------------ | ------------------------ |
+| Rows           | 1,308                    | 1,308                    |
+| Columns        | 59                       | 59                       |
+| Range          | 2023-01-30 to 2026-08-29 | 2023-01-30 to 2026-08-29 |
+| Missing values | 0                        | 0                        |
+
+Read latency was approximately 36 seconds via Arrow Flight.
+
+A benign warning is emitted on insert: `Casting timestamp column 'time' from 'ns' to
+'us' will lose precision`. Pandas stores nanosecond-resolution timestamps; Hopsworks
+stores microseconds. For daily data this is immaterial.
+
+**Note on row count.** The dataset grew from 1,287 rows to 1,308 during this phase. The
+backfill scripts collect data up to the previous day, and time elapsed between the
+original Phase 3 run and the post-migration re-run. Mean AQI shifted from 90.13 to 88.99
+accordingly — the added days fall in late August, which the Phase 2 analysis identified
+as one of the cleanest months of the year. This is expected behaviour, not drift.
+
+### Phase 4 result
+
+|               |                         |
+| ------------- | ----------------------- |
+| Feature group | `aqi_daily_features` v1 |
+| Rows          | 1,308                   |
+| Features      | 59                      |
+| Storage       | Offline                 |
+| Round trip    | Verified                |
