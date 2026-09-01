@@ -13,6 +13,7 @@ Where the README says _what_ the project is, this document says _why_ it is that
 - [Phase 1 — Data collection](#phase-1--data-collection)
 - [Phase 2 — Exploratory data analysis](#phase-2--exploratory-data-analysis)
 - [Phase 3 — Feature engineering](#phase-3--feature-engineering)
+- [Phase 4 — Feature store](#phase-4--feature-store)
 
 ---
 
