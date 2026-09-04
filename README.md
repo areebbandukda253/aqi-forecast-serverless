@@ -127,7 +127,7 @@ aqi-forecast-serverless/
 - [x] Phase 3 — Feature engineering
 - [x] Phase 4 — Feature store
 - [x] Phase 5 — Training dataset creation
-- [ ] Phase 6 — Baseline model
+- [x] Phase 6 — Baseline model
 - [ ] Phase 7 — Model experiments
 - [ ] Phase 8 — Evaluation and selection
 - [ ] Phase 9 — Model registry

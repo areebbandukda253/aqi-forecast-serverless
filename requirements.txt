@@ -7,3 +7,5 @@ seaborn==0.13.2
 jupyter==1.1.1
 ipykernel==6.29.5
 hopsworks[python]==5.0.6
+scikit-learn==1.4.2
+joblib==1.4.2

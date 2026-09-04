@@ -15,6 +15,7 @@ Where the README says _what_ the project is, this document says _why_ it is that
 - [Phase 3 — Feature engineering](#phase-3--feature-engineering)
 - [Phase 4 — Feature store](#phase-4--feature-store)
 - [Phase 5 — Training dataset](#phase-5--training-dataset)
+- [Phase 6 — Baseline models](#phase-6--baseline-models)
 
 ---
 
@@ -885,3 +886,113 @@ rest of the environment is left untouched.
 | Test             | 262 rows                                              |
 | Temporal overlap | None (asserted)                                       |
 | Output           | `data/processed/train.csv`, `data/processed/test.csv` |
+
+
+## Phase 6 — Baseline models
+
+**Goal:** establish an honest performance floor before any model is trained, so that
+later results can be judged as improvements rather than in isolation.
+
+Script: `src/baselines.py`
+
+### Why baselines come first
+
+A reported MAE of 12 carries no information on its own. If a rule requiring no machine
+learning also achieves 12, the model is decoration.
+
+This matters particularly for this dataset. Phase 2 established two properties that make
+naive prediction strong: low target variance (the interquartile range is 72–100 on a
+0–500 scale) and high autocorrelation (0.835 at one day). Both mean that "predict
+something close to today" is already a reasonable strategy. Any model must clear that bar
+to justify its complexity, its training cost, and its operational risk.
+
+### Metrics
+
+| Metric | Definition | Interpretation here |
+|---|---|---|
+| **MAE** | Mean absolute error | Typical error in AQI points. The most directly communicable metric. |
+| **RMSE** | Root mean squared error | Penalises large errors disproportionately. RMSE substantially above MAE indicates occasional severe misses. |
+| **R²** | Proportion of variance explained | Unforgiving on this dataset — low target variance leaves little variance to explain. Should be read relative to the baselines, not against an absolute standard. |
+| **MAPE** | Mean absolute percentage error | Error relative to magnitude. Useful because a 10-point error matters more at AQI 50 than at AQI 200. |
+
+### The three baselines
+
+| Baseline | Rule | Tests whether the model |
+|---|---|---|
+| Mean | Predict the training mean for every day | Learned anything at all |
+| Persistence | Predict today's AQI for all three horizons | Beats "nothing changes" |
+| Seasonal | Predict the training average for that calendar month | Beats pure seasonality |
+
+None involves fitting. Persistence in particular is what an informed person would guess
+with no model available.
+
+### Results on the test set
+
+**Mean**
+
+| Horizon | MAE | RMSE | R² | MAPE |
+|---|---|---|---|---|
+| day1 | 15.94 | 20.16 | -0.01 | 18.28 |
+| day2 | 16.01 | 20.23 | -0.01 | 18.40 |
+| day3 | 16.06 | 20.29 | -0.01 | 18.50 |
+
+**Persistence**
+
+| Horizon | MAE | RMSE | R² | MAPE |
+|---|---|---|---|---|
+| day1 | 9.21 | 13.59 | 0.54 | 10.12 |
+| day2 | 12.50 | 17.56 | 0.24 | 14.11 |
+| day3 | 14.36 | 19.87 | 0.03 | 16.17 |
+
+**Seasonal**
+
+| Horizon | MAE | RMSE | R² | MAPE |
+|---|---|---|---|---|
+| day1 | 14.01 | 18.06 | 0.19 | 15.93 |
+| day2 | 13.99 | 18.11 | 0.19 | 15.86 |
+| day3 | 13.88 | 18.08 | 0.20 | 15.69 |
+
+### Interpretation
+
+**The mean baseline is flat across horizons**, as expected — it ignores time entirely.
+Its R² of -0.01 is not an error: R² is computed against the test set mean while the
+baseline predicts the training mean, so it is marginally worse than zero by construction.
+
+**Persistence error tracks the Phase 2 autocorrelation exactly.**
+
+| Horizon | Persistence MAE | Autocorrelation |
+|---|---|---|
+| day1 | 9.21 | 0.835 |
+| day2 | 12.50 | 0.677 |
+| day3 | 14.36 | 0.590 |
+
+Error rises as autocorrelation decays. The EDA predicted this ordering before any model
+existed, and the baselines confirm it.
+
+**The significant result is at day+3, where seasonal overtakes persistence** — 13.88
+against 14.36. Three days out, knowing the calendar month is more informative than
+knowing today's AQI.
+
+This is direct empirical support for the direct multi-model architecture selected in
+Phase 3. The horizons are not the same problem scaled: day+1 is dominated by short-term
+memory and should lean on lag features, while day+3 is dominated by seasonal position and
+should lean on the cyclical month encoding. Three independently trained models can
+specialise accordingly; a single model constrained to serve all three could not. The
+Phase 3 decision was made on reasoning alone — it is now supported by measurement.
+
+### Targets for Phase 7
+
+| Horizon | MAE to beat | Set by |
+|---|---|---|
+| day+1 | **9.21** | persistence |
+| day+2 | **12.50** | persistence |
+| day+3 | **13.88** | seasonal |
+
+The day+1 target is demanding. Against a mean AQI of approximately 88, an MAE of 9.21
+represents roughly 10% error achieved with no machine learning whatsoever. A trained model
+reaching 8.0–8.5 would constitute a genuine improvement; expectations of a dramatic gain
+would be unrealistic given the autocorrelation structure of the data.
+
+Persistence at day+1 also achieves R² of 0.54, which sets realistic expectations for that
+metric. Models should be assessed against this figure rather than against an assumed
+target near 1.0.
