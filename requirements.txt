@@ -10,3 +10,4 @@ hopsworks[python]==5.0.6
 scikit-learn==1.4.2
 joblib==1.4.2
 xgboost==2.0.3
+tensorflow==2.16.1
